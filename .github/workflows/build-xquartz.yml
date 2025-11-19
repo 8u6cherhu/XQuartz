@@ -25,6 +25,42 @@ jobs:
           # Fetch full history for proper submodule handling
           fetch-depth: 0
 
+      - name: Fix nested submodule git:// URLs
+        run: |
+          # Fix nested submodules that use git:// protocol which is blocked in CI
+          # Recursively find and replace git:// URLs with https:// in all .gitmodules files
+          echo "Fixing git:// URLs in nested submodules..."
+          
+          find . -name ".gitmodules" -type f | while read gitmodules_file; do
+            if grep -q "git://anongit.freedesktop.org" "$gitmodules_file" 2>/dev/null; then
+              echo "Fixing $gitmodules_file"
+              # Replace git://anongit.freedesktop.org with https://gitlab.freedesktop.org
+              # and adjust path format (anongit uses /git/ prefix, gitlab doesn't)
+              sed -i.bak 's|git://anongit\.freedesktop\.org/git/|https://gitlab.freedesktop.org/|g' "$gitmodules_file"
+              sed -i.bak 's|git://anongit\.freedesktop\.org/|https://gitlab.freedesktop.org/|g' "$gitmodules_file"
+              # Fix xcb/util-common-m4.git -> xcb/util-common-m4.git (same structure)
+              # cairo case: /git/cairo -> cairo/cairo.git (already handled above)
+              rm -f "${gitmodules_file}.bak"
+            fi
+            
+            # Also fix git://git.code.sf.net and git://git.savannah.gnu.org
+            if grep -q "git://git.code.sf.net" "$gitmodules_file" 2>/dev/null; then
+              echo "Fixing SourceForge URL in $gitmodules_file"
+              sed -i.bak 's|git://git\.code\.sf\.net/|https://git.code.sf.net/|g' "$gitmodules_file"
+              rm -f "${gitmodules_file}.bak"
+            fi
+            
+            if grep -q "git://git.savannah.gnu.org" "$gitmodules_file" 2>/dev/null; then
+              echo "Fixing Savannah URL in $gitmodules_file"
+              sed -i.bak 's|git://git\.savannah\.gnu\.org/|https://git.savannah.gnu.org/git/|g' "$gitmodules_file"
+              rm -f "${gitmodules_file}.bak"
+            fi
+          done
+          
+          # Sync and re-update submodules with fixed URLs
+          git submodule sync --recursive || true
+          git submodule update --init --recursive || true
+
       - name: Set up Xcode
         # macOS 15 runners come with Xcode pre-installed
         # If you need a specific Xcode version, uncomment and configure:
