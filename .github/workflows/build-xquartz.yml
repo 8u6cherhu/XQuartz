@@ -22,14 +22,17 @@ jobs:
         run: |
           # Configure git to automatically rewrite git:// URLs to https:// BEFORE checkout
           # This fixes nested submodules (e.g., libxcb-*/m4) that use git:// protocol
-          # The URL rewrite will be applied to all git operations including submodule clones
-          echo "Configuring Git URL rewrite for anongit.freedesktop.org..."
+          # anongit.freedesktop.org has been deprecated and migrated to gitlab.freedesktop.org
+          echo "Configuring Git URL rewrite for deprecated anongit.freedesktop.org..."
           
-          # Rewrite all git:// URLs from anongit.freedesktop.org to https://
-          # This covers all nested submodules that use git:// protocol
-          git config --global url."https://anongit.freedesktop.org/".insteadOf "git://anongit.freedesktop.org/"
+          # Rewrite git://anongit.freedesktop.org/ to https://gitlab.freedesktop.org/
+          # This is the correct migration path - anongit is no longer available
+          git config --global url."https://gitlab.freedesktop.org/".insteadOf "git://anongit.freedesktop.org/"
           
-          # Also handle gitlab.freedesktop.org if any git:// URLs exist there
+          # Also rewrite https://anongit.freedesktop.org/ to gitlab (in case some already use https)
+          git config --global url."https://gitlab.freedesktop.org/".insteadOf "https://anongit.freedesktop.org/"
+          
+          # Handle gitlab.freedesktop.org if any git:// URLs exist there
           git config --global url."https://gitlab.freedesktop.org/".insteadOf "git://gitlab.freedesktop.org/" || true
           
           # Also handle savannah.gnu.org (for freetype2 submodule)
@@ -41,7 +44,7 @@ jobs:
           # Verify the configuration
           echo "Git URL rewrite configuration:"
           git config --global --get-regexp url.*insteadOf
-          echo "✓ URL rewrite configured - all git:// URLs will be automatically converted to https://"
+          echo "✓ URL rewrite configured - anongit.freedesktop.org will be redirected to gitlab.freedesktop.org"
 
       - name: Checkout repository
         uses: actions/checkout@v4
