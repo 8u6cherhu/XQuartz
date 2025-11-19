@@ -56,7 +56,13 @@ else
     SPARKLE_FEED_URL="https://www.xquartz.org/releases/sparkle-r1/release.xml"
 fi
 
-SANITIZER_LIB_DIR_SRC=$(echo $(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/*/lib/darwin)
+#SANITIZER_LIB_DIR_SRC=$(echo $(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/*/lib/darwin)
+# we are getting several directories now returned from this command, so choose the first one
+# which seems to match the one the compiler is adding to the binaries as well, luckily
+SANITIZER_LIB_DIR_SRC=$(
+  ls -d $(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/*/lib/darwin \
+    | sort -V | tail -n1
+)
 
 SANITIZER_CFLAGS="-fsanitize=address"
 SANITIZER_LIBS="libclang_rt.asan_osx_dynamic.dylib"
@@ -75,7 +81,7 @@ if [ "${APPLICATION_VERSION_STRING}" != "${APPLICATION_VERSION_STRING/alpha/}" ]
 
     # ASan requires use to not use -D_FORTIFY_SOURCE=2, or it can lead to false-positives
     HARDENING_CFLAGS="-fstack-protector-all"
-    export MACOSX_DEPLOYMENT_TARGET=10.10
+    export MACOSX_DEPLOYMENT_TARGET=10.13
 elif [ "${APPLICATION_VERSION_STRING}" != "${APPLICATION_VERSION_STRING/beta/}" ] ; then
     # Beta builds use ASan for the main executables
     SANITIZER_CONFIGS="EXEC"
@@ -83,12 +89,12 @@ elif [ "${APPLICATION_VERSION_STRING}" != "${APPLICATION_VERSION_STRING/beta/}" 
     # Beta builds use full stack protection and disable optimizations
     OPT_CFLAGS="-O0 -fno-optimize-sibling-calls -fno-omit-frame-pointer"
     HARDENING_CFLAGS="-fstack-protector-all"
-    export MACOSX_DEPLOYMENT_TARGET=10.10
+    export MACOSX_DEPLOYMENT_TARGET=10.13
 else
     # Release-candidate and Release builds
     OPT_CFLAGS="-Os"
     HARDENING_CFLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2"
-    export MACOSX_DEPLOYMENT_TARGET=10.9
+    export MACOSX_DEPLOYMENT_TARGET=10.13
 fi
 
 ARCHS_EXEC="arm64 x86_64"
@@ -422,16 +428,6 @@ do_meson_build() {
         meson build.${arch} -Dprefix=${PREFIX} $(eval echo $(cat "${confopt_file}")) --cross-file ${meson_cross_dir}/${arch}-darwin-xquartz || die "Could not configure in $(pwd)"
         ninja --verbose -C build.${arch} || die "Failed to compile in $(pwd)"
         sudo DESTDIR="${DESTDIR}.lipo.${arch}" ninja --verbose -C build.${arch} install || die "Failed to install in $(pwd)"
-
-        # Meson removes the LC_RPATH that we asked for.  This hack re-adds it
-        # cf: https://github.com/mesonbuild/meson/issues/11109
-        if has ${config} ${SANITIZER_CONFIGS} ; then
-            find "${DESTDIR}.lipo.${arch}" -type f | while read file ; do
-                if /usr/bin/file "${file}" | grep -q "Mach-O" ; then
-                    sudo install_name_tool -add_rpath "${SANITIZER_LIB_DIR}" "${file}"
-                fi
-            done
-        fi
 
         # Prune the .la files that we don't want
         sudo rm -f "${DESTDIR}.lipo.${arch}${PREFIX}/lib"/*.la
