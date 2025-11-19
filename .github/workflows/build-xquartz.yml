@@ -18,48 +18,37 @@ jobs:
     timeout-minutes: 180
 
     steps:
+      - name: Configure Git URL rewrite for nested submodules
+        run: |
+          # Configure git to automatically rewrite git:// URLs to https:// BEFORE checkout
+          # This fixes nested submodules (e.g., libxcb-*/m4) that use git:// protocol
+          # The URL rewrite will be applied to all git operations including submodule clones
+          echo "Configuring Git URL rewrite for anongit.freedesktop.org..."
+          
+          # Rewrite all git:// URLs from anongit.freedesktop.org to https://
+          # This covers all nested submodules that use git:// protocol
+          git config --global url."https://anongit.freedesktop.org/".insteadOf "git://anongit.freedesktop.org/"
+          
+          # Also handle gitlab.freedesktop.org if any git:// URLs exist there
+          git config --global url."https://gitlab.freedesktop.org/".insteadOf "git://gitlab.freedesktop.org/" || true
+          
+          # Also handle savannah.gnu.org (for freetype2 submodule)
+          git config --global url."https://git.savannah.gnu.org/".insteadOf "git://git.savannah.gnu.org/" || true
+          
+          # Also handle sourceforge (for libpng submodules)
+          git config --global url."https://git.code.sf.net/".insteadOf "git://git.code.sf.net/" || true
+          
+          # Verify the configuration
+          echo "Git URL rewrite configuration:"
+          git config --global --get-regexp url.*insteadOf
+          echo "✓ URL rewrite configured - all git:// URLs will be automatically converted to https://"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           # Fetch full history for proper submodule handling
           fetch-depth: 0
-
-      - name: Fix nested submodule git:// URLs
-        run: |
-          # Fix nested submodules that use git:// protocol which is blocked in CI
-          # Recursively find and replace git:// URLs with https:// in all .gitmodules files
-          echo "Fixing git:// URLs in nested submodules..."
-          
-          find . -name ".gitmodules" -type f | while read gitmodules_file; do
-            if grep -q "git://anongit.freedesktop.org" "$gitmodules_file" 2>/dev/null; then
-              echo "Fixing $gitmodules_file"
-              # Replace git://anongit.freedesktop.org with https://gitlab.freedesktop.org
-              # and adjust path format (anongit uses /git/ prefix, gitlab doesn't)
-              sed -i.bak 's|git://anongit\.freedesktop\.org/git/|https://gitlab.freedesktop.org/|g' "$gitmodules_file"
-              sed -i.bak 's|git://anongit\.freedesktop\.org/|https://gitlab.freedesktop.org/|g' "$gitmodules_file"
-              # Fix xcb/util-common-m4.git -> xcb/util-common-m4.git (same structure)
-              # cairo case: /git/cairo -> cairo/cairo.git (already handled above)
-              rm -f "${gitmodules_file}.bak"
-            fi
-            
-            # Also fix git://git.code.sf.net and git://git.savannah.gnu.org
-            if grep -q "git://git.code.sf.net" "$gitmodules_file" 2>/dev/null; then
-              echo "Fixing SourceForge URL in $gitmodules_file"
-              sed -i.bak 's|git://git\.code\.sf\.net/|https://git.code.sf.net/|g' "$gitmodules_file"
-              rm -f "${gitmodules_file}.bak"
-            fi
-            
-            if grep -q "git://git.savannah.gnu.org" "$gitmodules_file" 2>/dev/null; then
-              echo "Fixing Savannah URL in $gitmodules_file"
-              sed -i.bak 's|git://git\.savannah\.gnu\.org/|https://git.savannah.gnu.org/git/|g' "$gitmodules_file"
-              rm -f "${gitmodules_file}.bak"
-            fi
-          done
-          
-          # Sync and re-update submodules with fixed URLs
-          git submodule sync --recursive || true
-          git submodule update --init --recursive || true
 
       - name: Set up Xcode
         # macOS 15 runners come with Xcode pre-installed
