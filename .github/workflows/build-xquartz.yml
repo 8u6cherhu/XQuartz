@@ -14,16 +14,51 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    # Increased timeout: MacPorts build + XQuartz build can take 2-3 hours
-    timeout-minutes: 180
+    # Increased timeout: MacPorts build + XQuartz build can take 3-4 hours
+    timeout-minutes: 240
 
     steps:
-      - name: Checkout repository
+      - name: Configure git URL rewrite for nested submodules
+        run: |
+          # Configure git URL rewrite BEFORE checkout to ensure nested submodules clone correctly
+          # Nested submodules in libxcb-* use git://anongit.freedesktop.org/xcb/util-common-m4.git
+          # which fails in CI. Replace with working GitLab URL:
+          # https://gitlab.freedesktop.org/xorg/util/xcb-util-m4.git
+          git config --global url."https://gitlab.freedesktop.org/xorg/util/xcb-util-m4.git".insteadOf "git://anongit.freedesktop.org/xcb/util-common-m4.git"
+
+      - name: Checkout repository (first pass - code only)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
-          # Fetch full history for proper submodule handling
+          submodules: false
           fetch-depth: 0
+
+      - name: Checkout repository (second pass - with submodules)
+        run: |
+          # Now checkout submodules with the URL rewrite already configured
+          git submodule sync --recursive
+          git submodule update --init --recursive --force || true
+          
+          # Fix nested submodule URLs in libxcb-* repositories
+          # These repositories have their own .gitmodules files that reference git:// URLs
+          for libdir in src/xorg/lib/libxcb-*; do
+            if [ -d "$libdir" ] && [ -f "$libdir/.gitmodules" ]; then
+              echo "Fixing .gitmodules in $libdir"
+              cd "$libdir" || continue
+              # Replace git:// URL with HTTPS URL in nested .gitmodules
+              if grep -q "git://anongit.freedesktop.org/xcb/util-common-m4" .gitmodules 2>/dev/null; then
+                sed -i.bak 's|git://anongit.freedesktop.org/xcb/util-common-m4|https://gitlab.freedesktop.org/xorg/util/xcb-util-m4|g' .gitmodules || \
+                sed -i '' 's|git://anongit.freedesktop.org/xcb/util-common-m4|https://gitlab.freedesktop.org/xorg/util/xcb-util-m4|g' .gitmodules
+                rm -f .gitmodules.bak
+                # Sync and update the nested submodule
+                git submodule sync
+                git submodule update --init --force m4 || true
+              fi
+              cd - > /dev/null || true
+            fi
+          done
+          
+          # Final recursive update to ensure everything is in place
+          git submodule update --init --recursive --force
 
       - name: Set up Xcode
         # macOS 15 runners come with Xcode pre-installed
@@ -53,15 +88,15 @@ jobs:
           echo "✓ System dependencies verified"
 
       - name: Install MacPorts and build tools
-        timeout-minutes: 90
+        timeout-minutes: 240
         run: |
           # Run the MacPorts installation script
           # This builds MacPorts from source and installs:
           # STD: autoconf automake pkgconfig libtool py311-mako meson xmlto asciidoc doxygen fop groff gtk-doc graphviz
           # CMAKE: cmake
-          # Note: This step can take 30-60 minutes as it builds MacPorts and compiles all dependencies
-          echo "Starting MacPorts installation (this may take 30-60 minutes)..."
-          bash install-or-update-macports.sh
+          # Note: This step can take 1-3 hours as it builds MacPorts and compiles all dependencies
+          echo "Starting MacPorts installation (this may take 1-3 hours)..."
+          bash install-or-update-macports.sh 2>&1 | tee /tmp/macports-install.log | grep -E "(Installing|Building|Completed|Error|Failed)" || true
           
           echo "MacPorts installation completed"
 
@@ -119,10 +154,13 @@ jobs:
           echo "✓ All build tools verified"
 
       - name: Build XQuartz
-        timeout-minutes: 90
+        timeout-minutes: 240
+        
         env:
           # Skip interactive prompts (CI will time out on read)
           CI: true
+          # Reduce build verbosity to limit log size
+          MAKE_OPTS_ORIG: "V=1 -j$(sysctl -n hw.activecpu)"
         run: |
           # The compile script may require sudo for some operations
           # GitHub Actions runners have passwordless sudo
@@ -137,11 +175,16 @@ jobs:
           #
           # Note: The script uses set -e, but we want to capture artifacts even if
           # interactive parts fail or script exits early
-          echo "Starting XQuartz build (this may take 60-90 minutes)..."
+          echo "Starting XQuartz build (this may take 60-120 minutes)..."
+          
+          # Reduce verbosity: modify compile.sh to use less verbose output
+          # Replace -x (debug mode) and V=1 (verbose make) to reduce log size
+          export MAKE_OPTS="-j$(sysctl -n hw.activecpu)"
           
           set +e  # Allow script to continue after errors to check for artifacts
-          bash -x compile.sh
-          BUILD_EXIT_CODE=$?
+          # Run without -x to reduce output, capture important errors
+          bash compile.sh 2>&1 | tee /tmp/build.log | grep -E "(Error|Failed|Building|Installing|completed|✓|✗)" || true
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
           set -e  # Re-enable strict error checking
           
           echo "Build script exited with code: $BUILD_EXIT_CODE"
