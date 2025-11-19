@@ -18,40 +18,25 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Configure Git URL rewrite for nested submodules
+      - name: Configure git URL rewrite for nested submodules
         run: |
-          # Configure git to automatically rewrite git:// URLs to https:// BEFORE checkout
-          # This fixes nested submodules (e.g., libxcb-*/m4) that use git:// protocol
-          # anongit.freedesktop.org has been deprecated and migrated to gitlab.freedesktop.org
-          echo "Configuring Git URL rewrite for deprecated anongit.freedesktop.org..."
-          
-          # Rewrite git://anongit.freedesktop.org/ to https://gitlab.freedesktop.org/
-          # This is the correct migration path - anongit is no longer available
-          git config --global url."https://gitlab.freedesktop.org/".insteadOf "git://anongit.freedesktop.org/"
-          
-          # Also rewrite https://anongit.freedesktop.org/ to gitlab (in case some already use https)
-          git config --global url."https://gitlab.freedesktop.org/".insteadOf "https://anongit.freedesktop.org/"
-          
-          # Handle gitlab.freedesktop.org if any git:// URLs exist there
-          git config --global url."https://gitlab.freedesktop.org/".insteadOf "git://gitlab.freedesktop.org/" || true
-          
-          # Also handle savannah.gnu.org (for freetype2 submodule)
-          git config --global url."https://git.savannah.gnu.org/".insteadOf "git://git.savannah.gnu.org/" || true
-          
-          # Also handle sourceforge (for libpng submodules)
-          git config --global url."https://git.code.sf.net/".insteadOf "git://git.code.sf.net/" || true
-          
-          # Verify the configuration
-          echo "Git URL rewrite configuration:"
-          git config --global --get-regexp url.*insteadOf
-          echo "✓ URL rewrite configured - anongit.freedesktop.org will be redirected to gitlab.freedesktop.org"
+          # Configure git URL rewrite BEFORE checkout to ensure nested submodules clone correctly
+          # Nested submodules in libxcb-* use git://anongit.freedesktop.org/xcb/util-common-m4.git
+          # which fails in CI. Replace with working GitLab URL:
+          # https://gitlab.freedesktop.org/xorg/util/xcb-util-m4.git
+          git config --global url."https://gitlab.freedesktop.org/xorg/util/xcb-util-m4.git".insteadOf "git://anongit.freedesktop.org/xcb/util-common-m4.git"
 
-      - name: Checkout repository
+      - name: Checkout repository (first pass - code only)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
-          # Fetch full history for proper submodule handling
+          submodules: false
           fetch-depth: 0
+
+      - name: Checkout repository (second pass - with submodules)
+        run: |
+          # Now checkout submodules with the URL rewrite already configured
+          git submodule sync --recursive
+          git submodule update --init --recursive --force
 
       - name: Set up Xcode
         # macOS 15 runners come with Xcode pre-installed
