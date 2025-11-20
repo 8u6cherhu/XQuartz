@@ -99,22 +99,82 @@ jobs:
           bash install-or-update-macports.sh 2>&1 | tee /tmp/macports-install.log | grep -E "(Installing|Building|Completed|Error|Failed)" || true
           
           echo "MacPorts installation completed"
-
-      - name: Verify cmake installation
-        run: |
-          echo "Verifying cmake installation..."
-          # cmake should be installed in CMAKE prefix, but may be in STD prefix
-          if [ -f "/opt/buildX11-cmake/bin/cmake" ]; then
-            echo "✓ cmake found in CMAKE prefix: $(/opt/buildX11-cmake/bin/cmake --version | head -1)"
-          elif [ -f "/opt/buildX11/bin/cmake" ]; then
-            echo "✓ cmake found in STD prefix: $(/opt/buildX11/bin/cmake --version | head -1)"
-            echo "  Creating symlink from CMAKE prefix to STD prefix for compatibility"
+          
+          # Immediately verify and ensure cmake is available before build starts
+          echo ""
+          echo "=== Verifying cmake installation (required for epoll-shim and other components) ==="
+          CMAKE_FOUND=0
+          CMAKE_PATH=""
+          
+          # Check CMAKE prefix first (expected location from install-or-update-macports.sh)
+          if [ -f "/opt/buildX11-cmake/bin/cmake" ] && [ -x "/opt/buildX11-cmake/bin/cmake" ]; then
+            CMAKE_PATH="/opt/buildX11-cmake/bin/cmake"
+            CMAKE_VERSION=$("${CMAKE_PATH}" --version | head -1 2>&1 || echo "")
+            echo "✓ cmake found in CMAKE prefix: ${CMAKE_VERSION}"
+            CMAKE_FOUND=1
+          fi
+          
+          # Check STD prefix (fallback - cmake might have been installed as a dependency)
+          if [ $CMAKE_FOUND -eq 0 ] && [ -f "/opt/buildX11/bin/cmake" ] && [ -x "/opt/buildX11/bin/cmake" ]; then
+            CMAKE_PATH="/opt/buildX11/bin/cmake"
+            CMAKE_VERSION=$("${CMAKE_PATH}" --version | head -1 2>&1 || echo "")
+            echo "⚠ cmake found in STD prefix instead of CMAKE prefix"
+            echo "  Version: ${CMAKE_VERSION}"
+            echo "  Creating symlink in CMAKE prefix for compatibility with do_cmake_build()..."
             sudo mkdir -p /opt/buildX11-cmake/bin
-            sudo ln -sf /opt/buildX11/bin/cmake /opt/buildX11-cmake/bin/cmake || true
+            sudo ln -sf "${CMAKE_PATH}" /opt/buildX11-cmake/bin/cmake
+            # Verify symlink was created
+            if [ -f "/opt/buildX11-cmake/bin/cmake" ] && [ -L "/opt/buildX11-cmake/bin/cmake" ]; then
+              echo "  ✓ Symlink created successfully"
+              CMAKE_PATH="/opt/buildX11-cmake/bin/cmake"
+              CMAKE_FOUND=1
+            else
+              echo "  ✗ Failed to create symlink"
+            fi
+          fi
+          
+          # If still not found, provide diagnostic information and fail early
+          if [ $CMAKE_FOUND -eq 0 ]; then
+            echo ""
+            echo "✗ CRITICAL: cmake not found in either prefix"
+            echo "  This will cause build failure at epoll-shim stage (do_cmake_build)"
+            echo ""
+            echo "  Diagnostic information:"
+            echo "  - Searching for cmake binaries:"
+            find /opt/buildX11* -name "cmake" -type f 2>/dev/null | head -10 || echo "    No cmake binaries found"
+            echo ""
+            echo "  - Checking MacPorts installation status:"
+            if [ -f "/opt/buildX11/bin/port" ]; then
+              echo "    Checking if cmake package is installed:"
+              /opt/buildX11/bin/port installed cmake 2>&1 | head -10 || echo "      cmake package not found in installed list"
+            fi
+            if [ -f "/opt/buildX11-cmake/bin/port" ]; then
+              echo "    Checking CMAKE prefix MacPorts:"
+              /opt/buildX11-cmake/bin/port installed cmake 2>&1 | head -10 || echo "      cmake package not found in CMAKE prefix"
+            fi
+            echo ""
+            echo "  - Directory structure:"
+            ls -la /opt/buildX11-cmake/bin 2>/dev/null | head -10 || echo "    /opt/buildX11-cmake/bin does not exist"
+            ls -la /opt/buildX11/bin/cmake* 2>/dev/null || echo "    No cmake files in STD prefix"
+            echo ""
+            exit 1
+          fi
+          
+          # Final verification - ensure cmake is executable and works
+          echo ""
+          echo "=== Final cmake verification ==="
+          if [ -n "${CMAKE_PATH}" ] && [ -f "${CMAKE_PATH}" ] && [ -x "${CMAKE_PATH}" ]; then
+            FINAL_VERSION=$("${CMAKE_PATH}" --version | head -1 2>&1 || echo "")
+            FINAL_PATH=$(readlink -f "${CMAKE_PATH}" 2>/dev/null || echo "${CMAKE_PATH}")
+            echo "✓ cmake verification successful"
+            echo "  Version: ${FINAL_VERSION}"
+            echo "  Path: ${CMAKE_PATH}"
+            echo "  Resolved: ${FINAL_PATH}"
+            echo "  Executable: $([ -x "${CMAKE_PATH}" ] && echo "yes" || echo "no")"
+            echo ""
+            echo "cmake is ready for build process"
           else
-            echo "✗ cmake not found in either prefix"
-            echo "  Listing cmake-related files:"
-            find /opt/buildX11* -name "cmake" -type f 2>/dev/null || echo "  No cmake found"
+            echo "✗ cmake verification failed - binary not accessible"
             exit 1
           fi
 
