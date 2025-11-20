@@ -14,42 +14,72 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    # Increased timeout: MacPorts build + XQuartz build can take 3-4 hours
     timeout-minutes: 240
 
     steps:
+      - name: Install cmake first (before checkout)
+        timeout-minutes: 180
+        run: |
+          BUILD_TOOLS_PREFIX_CMAKE="/opt/buildX11-cmake"
+          BASE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+          TMP_BASE=$(mktemp -d /tmp/macports-cmake-XXXXXX)
+          trap "rm -rf ${TMP_BASE}" EXIT INT QUIT TERM
+          
+          bootstrap_base() {
+            local PREFIX=$1
+            if ! [ -f "${PREFIX}/bin/port" ]; then
+              cd "${TMP_BASE}" || exit 1
+              if ! [ -d "macports-base" ]; then
+                git clone -b release-2.11 --depth 1 https://github.com/macports/macports-base.git || exit 1
+              fi
+              cd macports-base || exit 1
+              ./configure --prefix="${PREFIX}" --with-applications-dir="${PREFIX}/Applications" --without-startupitems || exit 1
+              make -j$(sysctl -n hw.activecpu) || exit 1
+              sudo make install || exit 1
+            fi
+          }
+          
+          echo "Step 1: Bootstrapping MacPorts in CMAKE prefix..."
+          bootstrap_base "${BUILD_TOOLS_PREFIX_CMAKE}"
+          
+          echo "Step 2: Installing cmake..."
+          export PATH="${BUILD_TOOLS_PREFIX_CMAKE}/bin:${BASE_PATH}"
+          sudo ${BUILD_TOOLS_PREFIX_CMAKE}/bin/port -v selfupdate || exit 1
+          sudo ${BUILD_TOOLS_PREFIX_CMAKE}/bin/port -N -v -f install cmake || exit 1
+          sudo ${BUILD_TOOLS_PREFIX_CMAKE}/bin/port deactivate rleaves || true
+          
+          echo "Step 3: Verifying cmake installation..."
+          if [ -f "/opt/buildX11-cmake/bin/cmake" ] && [ -x "/opt/buildX11-cmake/bin/cmake" ]; then
+            CMAKE_VERSION=$(/opt/buildX11-cmake/bin/cmake --version | head -1)
+            echo "✓ cmake installed successfully: ${CMAKE_VERSION}"
+            /opt/buildX11-cmake/bin/cmake --version | head -3
+          else
+            echo "✗ cmake installation verification failed"
+            exit 1
+          fi
+
       - name: Configure git URL rewrite for nested submodules
         run: |
-          # Configure git URL rewrite BEFORE checkout to ensure nested submodules clone correctly
-          # Nested submodules in libxcb-* use git://anongit.freedesktop.org/xcb/util-common-m4.git
-          # which fails in CI. Replace with working GitLab URL:
-          # https://gitlab.freedesktop.org/xorg/util/xcb-util-m4.git
           git config --global url."https://gitlab.freedesktop.org/xorg/util/xcb-util-m4.git".insteadOf "git://anongit.freedesktop.org/xcb/util-common-m4.git"
 
-      - name: Checkout repository (first pass - code only)
+      - name: Checkout repository (code only)
         uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 0
 
-      - name: Checkout repository (second pass - with submodules)
+      - name: Checkout submodules
         run: |
-          # Now checkout submodules with the URL rewrite already configured
           git submodule sync --recursive
           git submodule update --init --recursive --force || true
           
-          # Fix nested submodule URLs in libxcb-* repositories
-          # These repositories have their own .gitmodules files that reference git:// URLs
           for libdir in src/xorg/lib/libxcb-*; do
             if [ -d "$libdir" ] && [ -f "$libdir/.gitmodules" ]; then
-              echo "Fixing .gitmodules in $libdir"
               cd "$libdir" || continue
-              # Replace git:// URL with HTTPS URL in nested .gitmodules
               if grep -q "git://anongit.freedesktop.org/xcb/util-common-m4" .gitmodules 2>/dev/null; then
                 sed -i.bak 's|git://anongit.freedesktop.org/xcb/util-common-m4|https://gitlab.freedesktop.org/xorg/util/xcb-util-m4|g' .gitmodules || \
                 sed -i '' 's|git://anongit.freedesktop.org/xcb/util-common-m4|https://gitlab.freedesktop.org/xorg/util/xcb-util-m4|g' .gitmodules
                 rm -f .gitmodules.bak
-                # Sync and update the nested submodule
                 git submodule sync
                 git submodule update --init --force m4 || true
               fi
@@ -57,172 +87,45 @@ jobs:
             fi
           done
           
-          # Final recursive update to ensure everything is in place
           git submodule update --init --recursive --force
 
       - name: Set up Xcode
-        # macOS 15 runners come with Xcode pre-installed
-        # If you need a specific Xcode version, uncomment and configure:
-        # uses: maxim-lobanov/setup-xcode@v1
-        # with:
-        #   xcode-version: latest-stable
         run: |
           xcode-select --print-path
           xcodebuild -version
-          
+
       - name: Verify system dependencies
         run: |
-          echo "Checking system dependencies..."
-          # Python 3.13 is used by py313-mako (MacPorts dependency)
-          python3 --version || echo "Warning: python3 not found"
-          python3.13 --version || echo "Note: python3.13 may not be in PATH (MacPorts will install it)"
-          
-          # Check for required system tools
           which git || (echo "ERROR: git not found" && exit 1)
           which make || (echo "ERROR: make not found" && exit 1)
           which clang || (echo "ERROR: clang not found" && exit 1)
-          
-          # macOS version check (needs 11.3+)
           sw_vers
-          
           echo "✓ System dependencies verified"
 
-      - name: Install MacPorts and build tools
+      - name: Install MacPorts and build tools (STD)
         timeout-minutes: 240
         run: |
-          # Run the MacPorts installation script
-          # This builds MacPorts from source and installs:
-          # STD: autoconf automake pkgconfig libtool py313-mako meson xmlto asciidoc doxygen fop groff gtk-doc graphviz
-          # CMAKE: cmake
-          # Note: This step can take 1-3 hours as it builds MacPorts and compiles all dependencies
-          echo "Starting MacPorts installation (this may take 1-3 hours)..."
           bash install-or-update-macports.sh 2>&1 | tee /tmp/macports-install.log | grep -E "(Installing|Building|Completed|Error|Failed)" || true
-          
           echo "MacPorts installation completed"
-          
-          # Immediately verify and ensure cmake is available before build starts
-          echo ""
-          echo "=== Verifying cmake installation (required for epoll-shim and other components) ==="
-          CMAKE_FOUND=0
-          CMAKE_PATH=""
-          
-          # Check CMAKE prefix first (expected location from install-or-update-macports.sh)
-          if [ -f "/opt/buildX11-cmake/bin/cmake" ] && [ -x "/opt/buildX11-cmake/bin/cmake" ]; then
-            CMAKE_PATH="/opt/buildX11-cmake/bin/cmake"
-            CMAKE_VERSION=$("${CMAKE_PATH}" --version | head -1 2>&1 || echo "")
-            echo "✓ cmake found in CMAKE prefix: ${CMAKE_VERSION}"
-            CMAKE_FOUND=1
-          fi
-          
-          # Check STD prefix (fallback - cmake might have been installed as a dependency)
-          if [ $CMAKE_FOUND -eq 0 ] && [ -f "/opt/buildX11/bin/cmake" ] && [ -x "/opt/buildX11/bin/cmake" ]; then
-            CMAKE_PATH="/opt/buildX11/bin/cmake"
-            CMAKE_VERSION=$("${CMAKE_PATH}" --version | head -1 2>&1 || echo "")
-            echo "⚠ cmake found in STD prefix instead of CMAKE prefix"
-            echo "  Version: ${CMAKE_VERSION}"
-            echo "  Creating symlink in CMAKE prefix for compatibility with do_cmake_build()..."
-            sudo mkdir -p /opt/buildX11-cmake/bin
-            sudo ln -sf "${CMAKE_PATH}" /opt/buildX11-cmake/bin/cmake
-            # Verify symlink was created
-            if [ -f "/opt/buildX11-cmake/bin/cmake" ] && [ -L "/opt/buildX11-cmake/bin/cmake" ]; then
-              echo "  ✓ Symlink created successfully"
-              CMAKE_PATH="/opt/buildX11-cmake/bin/cmake"
-              CMAKE_FOUND=1
-            else
-              echo "  ✗ Failed to create symlink"
-            fi
-          fi
-          
-          # If still not found, provide diagnostic information and fail early
-          if [ $CMAKE_FOUND -eq 0 ]; then
-            echo ""
-            echo "✗ CRITICAL: cmake not found in either prefix"
-            echo "  This will cause build failure at epoll-shim stage (do_cmake_build)"
-            echo ""
-            echo "  Diagnostic information:"
-            echo "  - Searching for cmake binaries:"
-            find /opt/buildX11* -name "cmake" -type f 2>/dev/null | head -10 || echo "    No cmake binaries found"
-            echo ""
-            echo "  - Checking MacPorts installation status:"
-            if [ -f "/opt/buildX11/bin/port" ]; then
-              echo "    Checking if cmake package is installed:"
-              /opt/buildX11/bin/port installed cmake 2>&1 | head -10 || echo "      cmake package not found in installed list"
-            fi
-            if [ -f "/opt/buildX11-cmake/bin/port" ]; then
-              echo "    Checking CMAKE prefix MacPorts:"
-              /opt/buildX11-cmake/bin/port installed cmake 2>&1 | head -10 || echo "      cmake package not found in CMAKE prefix"
-            fi
-            echo ""
-            echo "  - Directory structure:"
-            ls -la /opt/buildX11-cmake/bin 2>/dev/null | head -10 || echo "    /opt/buildX11-cmake/bin does not exist"
-            ls -la /opt/buildX11/bin/cmake* 2>/dev/null || echo "    No cmake files in STD prefix"
-            echo ""
-            exit 1
-          fi
-          
-          # Final verification - ensure cmake is executable and works
-          echo ""
-          echo "=== Final cmake verification ==="
-          if [ -n "${CMAKE_PATH}" ] && [ -f "${CMAKE_PATH}" ] && [ -x "${CMAKE_PATH}" ]; then
-            FINAL_VERSION=$("${CMAKE_PATH}" --version | head -1 2>&1 || echo "")
-            FINAL_PATH=$(readlink -f "${CMAKE_PATH}" 2>/dev/null || echo "${CMAKE_PATH}")
-            echo "✓ cmake verification successful"
-            echo "  Version: ${FINAL_VERSION}"
-            echo "  Path: ${CMAKE_PATH}"
-            echo "  Resolved: ${FINAL_PATH}"
-            echo "  Executable: $([ -x "${CMAKE_PATH}" ] && echo "yes" || echo "no")"
-            echo ""
-            echo "cmake is ready for build process"
-          else
-            echo "✗ cmake verification failed - binary not accessible"
-            exit 1
-          fi
 
       - name: Build XQuartz
         timeout-minutes: 240
-        
         env:
-          # Skip interactive prompts (CI will time out on read)
           CI: true
-          # Disable sanitizer to avoid build failures with X11 server
-          # Beta builds normally enable ASan, but it can cause issues in CI
           SANITIZER_CONFIGS: ""
         run: |
-          # The compile script may require sudo for some operations
-          # GitHub Actions runners have passwordless sudo
-          # 
-          # Build process overview:
-          # 1. Initializes git submodules (creates submodules.initialized flag)
-          # 2. Builds base components (Sparkle, libpng, epoll-shim, freetype2, pixman, fontconfig)
-          # 3. Builds X11 libraries and utilities
-          # 4. Builds Mesa (OpenGL), Cairo, X server
-          # 5. Builds XQuartz server and bundles into XQuartz.app
-          # 6. Packages into products/ directory
-          # 7. Interactive prompts for notarization/distribution (skipped in CI)
-          #
-          # Important: We must NOT use grep in a pipe as it can corrupt exit codes
-          # and break the build flow. Instead, we save full logs and show summaries.
-          echo "Starting XQuartz build (this may take 60-120 minutes)..."
-          echo "Sanitizer disabled: ${SANITIZER_CONFIGS:-none}"
-          
-          # Reduce verbosity: disable verbose make output but keep full logs
+          echo "Starting XQuartz build..."
           export MAKE_OPTS="-j$(sysctl -n hw.activecpu)"
           
-          # Build with full logging - NO grep pipe to preserve exit codes
-          # Save full log to file, display progress summary separately
           bash compile.sh 2>&1 | tee /tmp/build.log
           BUILD_EXIT_CODE=${PIPESTATUS[0]}
           
           echo ""
           echo "Build script exited with code: $BUILD_EXIT_CODE"
-          
-          # Extract and display key information from the log
           echo ""
           echo "=== Build Summary ==="
-          echo "Key build steps:"
           grep -E "(Building|Installing|do_|✓|✗)" /tmp/build.log | tail -30 || true
           
-          # If build failed, show detailed error context
           if [ $BUILD_EXIT_CODE -ne 0 ]; then
             echo ""
             echo "=== Build failed. Error context (last 100 lines) ==="
@@ -230,115 +133,51 @@ jobs:
             echo ""
           fi
           
-          # Verify critical build artifacts were created
-          # Expected artifacts:
-          # - products/XQuartz.dest/ - staging directory with built files
-          # - products/XQuartz.dest/Applications/Utilities/XQuartz.app/Contents/MacOS/X11 - X11 server executable
-          # - products/XQuartz.dest/Applications/Utilities/XQuartz.app/Contents/MacOS/X11.bin - wrapper binary
-          # - products/XQuartz.dest/Applications/Utilities/XQuartz.app/Contents/MacOS/X11.sh - wrapper script
-          # - products/XQuartz.signed/ - signed and stripped binaries (if do_strip_sign_dsyms ran)
-          # - products/XQuartz.symbols/ - debug symbols (if do_strip_sign_dsyms ran)
-          # - XQuartz-*.pkg - installer package (if do_pkg ran)
+          APP_PATH="products/XQuartz.dest/Applications/Utilities/XQuartz.app"
+          MACOS_DIR="${APP_PATH}/Contents/MacOS"
           
           echo ""
           echo "=== Verifying Build Artifacts ==="
           
-          APP_PATH="products/XQuartz.dest/Applications/Utilities/XQuartz.app"
-          MACOS_DIR="${APP_PATH}/Contents/MacOS"
-          
           if [ ! -d "products" ]; then
             echo "✗ Build artifacts directory 'products/' not found"
-            echo "Build did not complete successfully."
             exit $BUILD_EXIT_CODE
           fi
-          
-          echo "✓ Build artifacts directory found"
-          echo "Contents of products/:"
-          ls -lah products/ || true
           
           if [ ! -d "products/XQuartz.dest" ]; then
             echo "✗ Build staging directory 'products/XQuartz.dest' not found"
             exit $BUILD_EXIT_CODE
           fi
           
-          echo "✓ Build staging directory exists"
-          echo "Size of build artifacts:"
-          du -sh products/XQuartz.dest || true
-          
-          # CRITICAL: Verify XQuartz.app contains core executables
           if [ ! -d "${APP_PATH}" ]; then
-            echo "✗ XQuartz.app bundle not found at ${APP_PATH}"
-            echo "Build did not complete the app bundling phase."
+            echo "✗ XQuartz.app bundle not found"
             exit 1
           fi
           
-          echo "✓ XQuartz.app bundle found"
-          
-          # Check for critical executables in MacOS directory
           MISSING_FILES=0
           if [ ! -f "${MACOS_DIR}/X11" ]; then
-            echo "✗ CRITICAL: X11 server executable not found at ${MACOS_DIR}/X11"
+            echo "✗ CRITICAL: X11 server executable not found"
             MISSING_FILES=1
-          else
-            echo "✓ X11 server executable found"
-            ls -lh "${MACOS_DIR}/X11" || true
           fi
-          
           if [ ! -f "${MACOS_DIR}/X11.bin" ]; then
-            echo "✗ CRITICAL: X11.bin wrapper not found at ${MACOS_DIR}/X11.bin"
+            echo "✗ CRITICAL: X11.bin wrapper not found"
             MISSING_FILES=1
-          else
-            echo "✓ X11.bin wrapper found"
           fi
-          
           if [ ! -f "${MACOS_DIR}/X11.sh" ]; then
-            echo "✗ CRITICAL: X11.sh script not found at ${MACOS_DIR}/X11.sh"
+            echo "✗ CRITICAL: X11.sh script not found"
             MISSING_FILES=1
-          else
-            echo "✓ X11.sh script found"
           fi
-          
-          # List MacOS directory contents for debugging
-          echo ""
-          echo "Contents of ${MACOS_DIR}:"
-          ls -lah "${MACOS_DIR}" 2>/dev/null || echo "  Directory does not exist or is empty"
           
           if [ $MISSING_FILES -eq 1 ]; then
-            echo ""
             echo "✗ Build incomplete: Critical X11 executables are missing"
-            echo "The XQuartz.app bundle is incomplete and cannot run."
-            echo "This indicates that do_xserver() or do_bundle() stages did not complete."
             exit 1
           fi
           
-          # Check for other artifacts (optional but good to verify)
-          if ls products/XQuartz.signed 2>/dev/null; then
-            echo "✓ Signed binaries directory found"
-          fi
-          
-          if ls XQuartz-*.pkg 2>/dev/null; then
-            echo "✓ Installer package found"
-            ls -lh XQuartz-*.pkg || true
-          else
-            echo "Note: Installer package not found (may be normal if do_pkg was skipped)"
-          fi
-          
-          # Final status
+          echo "✓ All critical build artifacts verified"
           if [ $BUILD_EXIT_CODE -ne 0 ]; then
-            echo ""
             echo "Note: Script exited with error code $BUILD_EXIT_CODE, but core artifacts exist."
-            echo "This may be due to:"
-            echo "  - Skipped interactive prompts (notarization/distribution)"
-            echo "  - Missing code signing certificates (expected in CI)"
-            echo "  - Missing i386 SDK (build will work but not be distributable)"
-            echo "  - do_pkg or do_notarize steps failed (non-critical)"
-            echo ""
-            echo "✓ Build completed with core components (XQuartz.app is functional)"
             exit 0
           fi
-          
-          echo ""
-          echo "✓ Build completed successfully with all components"
 
       - name: Upload build artifacts
         if: always()
