@@ -73,9 +73,9 @@ jobs:
       - name: Verify system dependencies
         run: |
           echo "Checking system dependencies..."
-          # Python 3.11 is required for py311-mako (MacPorts dependency)
+          # Python 3.13 is used by py313-mako (MacPorts dependency)
           python3 --version || echo "Warning: python3 not found"
-          python3.11 --version || echo "Note: python3.11 may not be in PATH (MacPorts will install it)"
+          python3.13 --version || echo "Note: python3.13 may not be in PATH (MacPorts will install it)"
           
           # Check for required system tools
           which git || (echo "ERROR: git not found" && exit 1)
@@ -92,8 +92,9 @@ jobs:
         run: |
           # Run the MacPorts installation script
           # This builds MacPorts from source and installs:
-          # STD: autoconf automake pkgconfig libtool py311-mako meson xmlto asciidoc doxygen fop groff gtk-doc graphviz
+          # STD: autoconf automake pkgconfig libtool py313-mako meson xmlto asciidoc doxygen fop groff gtk-doc graphviz
           # CMAKE: cmake
+          # Note: libtool is typically installed as 'glibtool' on macOS to avoid conflicts with system libtool
           # Note: This step can take 1-3 hours as it builds MacPorts and compiles all dependencies
           echo "Starting MacPorts installation (this may take 1-3 hours)..."
           bash install-or-update-macports.sh 2>&1 | tee /tmp/macports-install.log | grep -E "(Installing|Building|Completed|Error|Failed)" || true
@@ -105,14 +106,15 @@ jobs:
           echo "Verifying build tools installation..."
           
           # Expected MacPorts tools from install-or-update-macports.sh:
-          # STD prefix (/opt/buildX11): autoconf, automake, pkgconfig, libtool, py311-mako, meson, xmlto, asciidoc, doxygen, fop, groff, gtk-doc, graphviz
+          # STD prefix (/opt/buildX11): autoconf, automake, pkgconfig, libtool (as glibtool), py313-mako, meson, xmlto, asciidoc, doxygen, fop, groff, gtk-doc, graphviz
           # CMAKE prefix (/opt/buildX11-cmake): cmake
+          # Note: On macOS, MacPorts installs GNU libtool as 'glibtool' to avoid conflicts with system BSD libtool
           
           TOOLS_STD=(
             "autoconf"
             "automake"
             "pkg-config"
-            "libtool"
+            "glibtool"
             "meson"
             "xmlto"
             "asciidoc"
@@ -130,8 +132,22 @@ jobs:
             if [ -f "/opt/buildX11/bin/${tool}" ]; then
               echo "  ✓ ${tool}: $(/opt/buildX11/bin/${tool} --version 2>&1 | head -1 || echo 'found')"
             else
-              echo "  ✗ ${tool} not found"
-              exit 1
+              # Special handling for glibtool (may be installed as libtool in some cases)
+              if [ "${tool}" == "glibtool" ]; then
+                if [ -f "/opt/buildX11/bin/libtool" ]; then
+                  echo "  ✓ libtool (found as libtool, not glibtool): $(/opt/buildX11/bin/libtool --version 2>&1 | head -1 || echo 'found')"
+                else
+                  echo "  ✗ ${tool} not found (also checked libtool)"
+                  echo "    Listing libtool-related files for debugging:"
+                  ls -la /opt/buildX11/bin/*libtool* 2>/dev/null || echo "    No libtool variants found"
+                  echo "    Contents of /opt/buildX11/bin (partial):"
+                  ls /opt/buildX11/bin | grep -i tool | head -10 || echo "    No tool-related files found"
+                  exit 1
+                fi
+              else
+                echo "  ✗ ${tool} not found in /opt/buildX11/bin/"
+                exit 1
+              fi
             fi
           done
           
@@ -145,7 +161,7 @@ jobs:
             fi
           done
           
-          # Verify Python 3.11 is selected (required for py311-mako)
+          # Verify Python 3.13 is selected (install-or-update-macports.sh uses py313-mako)
           if [ -f "/opt/buildX11/bin/port" ]; then
             PYTHON_VERSION=$(/opt/buildX11/bin/port select --show python3 2>&1 || echo "")
             echo "Python3 selection: ${PYTHON_VERSION}"
