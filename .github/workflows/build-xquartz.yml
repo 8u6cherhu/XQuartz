@@ -130,11 +130,19 @@ jobs:
           
           set +e  # Allow script to continue after errors to check for artifacts
           # Run without -x to reduce output, capture important errors
-          bash compile.sh 2>&1 | tee /tmp/build.log | grep -E "(Error|Failed|Building|Installing|completed|✓|✗)" || true
+          bash compile.sh 2>&1 | tee /tmp/build.log | grep -E "(Error|Failed|Building|Installing|completed|✓|✗|die|fatal|error:)" || true
           BUILD_EXIT_CODE=${PIPESTATUS[0]}
           set -e  # Re-enable strict error checking
           
           echo "Build script exited with code: $BUILD_EXIT_CODE"
+          
+          # If build failed, show the last error lines from the log
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo ""
+            echo "=== Build failed. Showing last 50 lines of build log ==="
+            tail -50 /tmp/build.log || true
+            echo ""
+          fi
           
           # Check if build artifacts were created
           # Expected artifacts:
