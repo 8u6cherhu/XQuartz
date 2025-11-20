@@ -94,7 +94,6 @@ jobs:
           # This builds MacPorts from source and installs:
           # STD: autoconf automake pkgconfig libtool py313-mako meson xmlto asciidoc doxygen fop groff gtk-doc graphviz
           # CMAKE: cmake
-          # Note: libtool is typically installed as 'glibtool' on macOS to avoid conflicts with system libtool
           # Note: This step can take 1-3 hours as it builds MacPorts and compiles all dependencies
           echo "Starting MacPorts installation (this may take 1-3 hours)..."
           bash install-or-update-macports.sh 2>&1 | tee /tmp/macports-install.log | grep -E "(Installing|Building|Completed|Error|Failed)" || true
@@ -109,64 +108,170 @@ jobs:
           # STD prefix (/opt/buildX11): autoconf, automake, pkgconfig, libtool (as glibtool), py313-mako, meson, xmlto, asciidoc, doxygen, fop, groff, gtk-doc, graphviz
           # CMAKE prefix (/opt/buildX11-cmake): cmake
           # Note: On macOS, MacPorts installs GNU libtool as 'glibtool' to avoid conflicts with system BSD libtool
+          # Note: 'port deactivate rleaves' may deactivate some packages, so we need to check and reactivate if needed
           
-          TOOLS_STD=(
-            "autoconf"
-            "automake"
-            "pkg-config"
-            "glibtool"
-            "meson"
-            "xmlto"
-            "asciidoc"
-            "doxygen"
-            "fop"
-            "groff"
-          )
-          
-          TOOLS_CMAKE=(
-            "cmake"
-          )
-          
-          echo "Checking STD tools in /opt/buildX11/bin:"
-          for tool in "${TOOLS_STD[@]}"; do
-            if [ -f "/opt/buildX11/bin/${tool}" ]; then
-              echo "  ✓ ${tool}: $(/opt/buildX11/bin/${tool} --version 2>&1 | head -1 || echo 'found')"
-            else
-              # Special handling for glibtool (may be installed as libtool in some cases)
-              if [ "${tool}" == "glibtool" ]; then
-                if [ -f "/opt/buildX11/bin/libtool" ]; then
-                  echo "  ✓ libtool (found as libtool, not glibtool): $(/opt/buildX11/bin/libtool --version 2>&1 | head -1 || echo 'found')"
-                else
-                  echo "  ✗ ${tool} not found (also checked libtool)"
-                  echo "    Listing libtool-related files for debugging:"
-                  ls -la /opt/buildX11/bin/*libtool* 2>/dev/null || echo "    No libtool variants found"
-                  echo "    Contents of /opt/buildX11/bin (partial):"
-                  ls /opt/buildX11/bin | grep -i tool | head -10 || echo "    No tool-related files found"
-                  exit 1
-                fi
-              else
-                echo "  ✗ ${tool} not found in /opt/buildX11/bin/"
-                exit 1
+          # Generic function to find and verify a tool
+          # Arguments: tool_name primary_prefix alternate_prefixes macports_name alt_binary_name
+          verify_tool() {
+            local tool_name=$1
+            local primary_prefix=$2
+            local alternate_prefixes=$3
+            local macports_name=$4
+            local alt_binary_name=$5
+            
+            local found=0
+            local found_path=""
+            local found_prefix=""
+            local actual_tool_name="$tool_name"
+            
+            # Build list of prefixes to check (primary first, then alternates)
+            local prefixes="$primary_prefix"
+            if [ -n "$alternate_prefixes" ]; then
+              prefixes="$primary_prefix $alternate_prefixes"
+            fi
+            
+            # Try to find the tool in any prefix
+            for prefix in $prefixes; do
+              # Try primary binary name
+              local check_path="${prefix}/bin/${tool_name}"
+              if [ -f "$check_path" ] && [ -x "$check_path" ]; then
+                found=1
+                found_path="$check_path"
+                found_prefix="$prefix"
+                actual_tool_name="$tool_name"
+                break
               fi
+              
+              # Try alternate binary name if specified
+              if [ -n "$alt_binary_name" ]; then
+                check_path="${prefix}/bin/${alt_binary_name}"
+                if [ -f "$check_path" ] && [ -x "$check_path" ]; then
+                  found=1
+                  found_path="$check_path"
+                  found_prefix="$prefix"
+                  actual_tool_name="$alt_binary_name"
+                  break
+                fi
+              fi
+            done
+            
+            if [ $found -eq 1 ]; then
+              local version_output
+              version_output=$("$found_path" --version 2>&1 | head -1 || echo "found")
+              if [ "$found_prefix" == "$primary_prefix" ]; then
+                echo "  ✓ ${tool_name}: $version_output"
+              else
+                echo "  ✓ ${tool_name} (found in alternate prefix $found_prefix): $version_output"
+              fi
+              return 0
             fi
-          done
+            
+            # Tool not found, check MacPorts status if configured
+            if [ -n "$macports_name" ] && [ -f "${primary_prefix}/bin/port" ]; then
+              echo "  ✗ ${tool_name} not found in any prefix, checking MacPorts status..."
+              
+              # Check if package is installed and active
+              local installed_status
+              installed_status=$("${primary_prefix}/bin/port" installed "$macports_name" 2>&1 | grep -E "^\s+.*${macports_name}.*\(active\)" || echo "")
+              
+              if [ -n "$installed_status" ]; then
+                echo "    Package $macports_name is installed (active) but binary not found"
+                echo "    Attempting to locate package files..."
+                "${primary_prefix}/bin/port" contents "$macports_name" 2>&1 | grep -E "bin/${tool_name}|bin/${alt_binary_name:-${tool_name}}" | head -5 || echo "      No matching binaries found in package"
+                return 1
+              fi
+              
+              # Check if package is installed but inactive (may have been deactivated by 'port deactivate rleaves')
+              local inactive_status
+              inactive_status=$("${primary_prefix}/bin/port" installed "$macports_name" 2>&1 | grep -E "^\s+.*${macports_name}.*\(inactive\)" || echo "")
+              
+              if [ -n "$inactive_status" ]; then
+                echo "    Package $macports_name is installed but INACTIVE (likely deactivated by 'port deactivate rleaves')"
+                echo "    Attempting to reactivate..."
+                if sudo "${primary_prefix}/bin/port" activate "$macports_name" 2>&1; then
+                  echo "    Reactivation successful, checking again..."
+                  # Try to find it again after reactivation
+                  sleep 1
+                  for prefix in $prefixes; do
+                    local check_path="${prefix}/bin/${tool_name}"
+                    if [ -f "$check_path" ] && [ -x "$check_path" ]; then
+                      local version_output
+                      version_output=$("$check_path" --version 2>&1 | head -1 || echo "found")
+                      echo "  ✓ ${tool_name} (reactivated): $version_output"
+                      return 0
+                    fi
+                    if [ -n "$alt_binary_name" ]; then
+                      check_path="${prefix}/bin/${alt_binary_name}"
+                      if [ -f "$check_path" ] && [ -x "$check_path" ]; then
+                        local version_output
+                        version_output=$("$check_path" --version 2>&1 | head -1 || echo "found")
+                        echo "  ✓ ${alt_binary_name} (reactivated): $version_output"
+                        return 0
+                      fi
+                    fi
+                  done
+                  echo "    Reactivated but binary still not found"
+                else
+                  echo "    Reactivation failed"
+                fi
+                return 1
+              fi
+              
+              # Package not installed
+              echo "    Package $macports_name is not installed"
+            fi
+            
+            # Still not found, provide detailed debugging info
+            echo "  ✗ ${tool_name} not found"
+            echo "    Searched prefixes: $prefixes"
+            echo "    Listing files in searched paths:"
+            for prefix in $prefixes; do
+              echo "      ${prefix}/bin/:"
+              ls -la "${prefix}/bin/"*${tool_name}* 2>/dev/null | head -5 || echo "        No ${tool_name} variants found"
+              if [ -n "$alt_binary_name" ]; then
+                ls -la "${prefix}/bin/"*${alt_binary_name}* 2>/dev/null | head -5 || echo "        No ${alt_binary_name} variants found"
+              fi
+            done
+            return 1
+          }
           
-          echo "Checking CMAKE tools in /opt/buildX11-cmake/bin:"
-          for tool in "${TOOLS_CMAKE[@]}"; do
-            if [ -f "/opt/buildX11-cmake/bin/${tool}" ]; then
-              echo "  ✓ ${tool}: $(/opt/buildX11-cmake/bin/${tool} --version 2>&1 | head -1 || echo 'found')"
-            else
-              echo "  ✗ ${tool} not found"
-              exit 1
-            fi
-          done
+          # Verify STD tools
+          # Format: verify_tool tool_name primary_prefix alternate_prefixes macports_name alt_binary_name
+          echo "Checking STD tools in /opt/buildX11/bin:"
+          local std_failed=0
+          
+          verify_tool "autoconf" "/opt/buildX11" "" "autoconf" "" || std_failed=1
+          verify_tool "automake" "/opt/buildX11" "" "automake" "" || std_failed=1
+          verify_tool "pkg-config" "/opt/buildX11" "" "pkgconfig" "" || std_failed=1
+          verify_tool "glibtool" "/opt/buildX11" "" "libtool" "libtool" || std_failed=1
+          verify_tool "meson" "/opt/buildX11" "" "meson" "" || std_failed=1
+          verify_tool "xmlto" "/opt/buildX11" "" "xmlto" "" || std_failed=1
+          verify_tool "asciidoc" "/opt/buildX11" "" "asciidoc" "" || std_failed=1
+          verify_tool "doxygen" "/opt/buildX11" "" "doxygen" "" || std_failed=1
+          verify_tool "fop" "/opt/buildX11" "" "fop" "" || std_failed=1
+          verify_tool "groff" "/opt/buildX11" "" "groff" "" || std_failed=1
+          
+          echo ""
+          echo "Checking CMAKE tools:"
+          local cmake_failed=0
+          
+          # cmake should be in CMAKE prefix, but may be installed in STD prefix as dependency
+          verify_tool "cmake" "/opt/buildX11-cmake" "/opt/buildX11" "cmake" "" || cmake_failed=1
           
           # Verify Python 3.13 is selected (install-or-update-macports.sh uses py313-mako)
           if [ -f "/opt/buildX11/bin/port" ]; then
+            echo ""
             PYTHON_VERSION=$(/opt/buildX11/bin/port select --show python3 2>&1 || echo "")
             echo "Python3 selection: ${PYTHON_VERSION}"
           fi
           
+          if [ $std_failed -eq 1 ] || [ $cmake_failed -eq 1 ]; then
+            echo ""
+            echo "✗ Some build tools verification failed"
+            exit 1
+          fi
+          
+          echo ""
           echo "✓ All build tools verified"
 
       - name: Build XQuartz
@@ -271,4 +376,3 @@ jobs:
             *.log
             **/*.log
           retention-days: 7
-
