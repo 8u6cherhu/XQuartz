@@ -100,6 +100,24 @@ jobs:
           
           echo "MacPorts installation completed"
 
+      - name: Verify cmake installation
+        run: |
+          echo "Verifying cmake installation..."
+          # cmake should be installed in CMAKE prefix, but may be in STD prefix
+          if [ -f "/opt/buildX11-cmake/bin/cmake" ]; then
+            echo "✓ cmake found in CMAKE prefix: $(/opt/buildX11-cmake/bin/cmake --version | head -1)"
+          elif [ -f "/opt/buildX11/bin/cmake" ]; then
+            echo "✓ cmake found in STD prefix: $(/opt/buildX11/bin/cmake --version | head -1)"
+            echo "  Creating symlink from CMAKE prefix to STD prefix for compatibility"
+            sudo mkdir -p /opt/buildX11-cmake/bin
+            sudo ln -sf /opt/buildX11/bin/cmake /opt/buildX11-cmake/bin/cmake || true
+          else
+            echo "✗ cmake not found in either prefix"
+            echo "  Listing cmake-related files:"
+            find /opt/buildX11* -name "cmake" -type f 2>/dev/null || echo "  No cmake found"
+            exit 1
+          fi
+
       - name: Build XQuartz
         timeout-minutes: 240
         
