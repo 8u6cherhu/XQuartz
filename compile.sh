@@ -86,7 +86,7 @@ elif [ "${APPLICATION_VERSION_STRING}" != "${APPLICATION_VERSION_STRING/beta/}" 
     export MACOSX_DEPLOYMENT_TARGET=10.10
 else
     # Release-candidate and Release builds
-    OPT_CFLAGS="-O2"
+    OPT_CFLAGS="-O3 -pipe"
     HARDENING_CFLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2"
     export MACOSX_DEPLOYMENT_TARGET=10.9
 fi
@@ -198,9 +198,29 @@ setup_environment() {
         sdkdir=${SDKROOT_i386}
     fi
 
+    local simd_flags=""
+    if has arm64 ${archs} ; then
+        # Apple Silicon optimization: use generic A14 to ensure compatibility
+        simd_flags="-mcpu=apple-a14 -mtune=apple-a14"
+    fi
+
     export CPPFLAGS="-I${PREFIX}/include -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks -DFAIL_HARD"
-    export CFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${OPT_CFLAGS} ${DEBUG_CFLAGS} ${HARDENING_CFLAGS} ${WARNING_CFLAGS}"
-    export LDFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} -L${PREFIX}/lib -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks"
+    
+    # Add LTO and vectorization for ARM64 (only in non-sanitizer builds)
+    local perf_flags=""
+    if has arm64 ${archs} && [ -z "${SANITIZER_CONFIGS}" ]; then
+        perf_flags="-flto=thin -ftree-vectorize -funroll-loops"
+    fi
+    
+    export CFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${simd_flags} ${OPT_CFLAGS} ${perf_flags} ${DEBUG_CFLAGS} ${HARDENING_CFLAGS} ${WARNING_CFLAGS}"
+    
+    # LDFLAGS also needs LTO (must match CFLAGS)
+    local lto_ldflags=""
+    if has arm64 ${archs} && [ -z "${SANITIZER_CONFIGS}" ]; then
+        lto_ldflags="-flto=thin"
+    fi
+    
+    export LDFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${lto_ldflags} -L${PREFIX}/lib -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks"
 
     if ! has i386 ${archs} && has ${config} ${SANITIZER_CONFIGS}; then
         export CFLAGS="${CFLAGS} ${SANITIZER_CFLAGS}"
