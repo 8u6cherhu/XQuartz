@@ -86,7 +86,7 @@ elif [ "${APPLICATION_VERSION_STRING}" != "${APPLICATION_VERSION_STRING/beta/}" 
     export MACOSX_DEPLOYMENT_TARGET=10.10
 else
     # Release-candidate and Release builds
-    OPT_CFLAGS="-Os"
+    OPT_CFLAGS="-O2"
     HARDENING_CFLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2"
     export MACOSX_DEPLOYMENT_TARGET=10.9
 fi
