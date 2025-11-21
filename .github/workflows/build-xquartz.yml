@@ -113,6 +113,8 @@ jobs:
         env:
           CI: true
           SANITIZER_CONFIGS: ""
+          LC_ALL: C
+          LANG: C
         run: |
           echo "Starting XQuartz build..."
           export MAKE_OPTS="-j$(sysctl -n hw.activecpu)"
