@@ -14,7 +14,7 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 240
+    timeout-minutes: 600
 
     steps:
       - name: Install cmake first (before checkout)
