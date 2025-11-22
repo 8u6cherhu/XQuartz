@@ -213,8 +213,9 @@ setup_environment() {
     export CPPFLAGS="-I${PREFIX}/include -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks -DFAIL_HARD"
     
     # Add LTO and vectorization for ARM64 (only in non-sanitizer builds)
+    # Skip LTO during configure phase as it can cause configure tests to fail
     local perf_flags=""
-    if has arm64 ${archs} && [ -z "${SANITIZER_CONFIGS}" ]; then
+    if has arm64 ${archs} && [ -z "${SANITIZER_CONFIGS}" ] && [ "${SKIP_LTO_FOR_CONFIGURE}" != "YES" ]; then
         perf_flags="-flto=thin -ftree-vectorize -funroll-loops"
     fi
     
@@ -222,7 +223,7 @@ setup_environment() {
     
     # LDFLAGS also needs LTO (must match CFLAGS)
     local lto_ldflags=""
-    if has arm64 ${archs} && [ -z "${SANITIZER_CONFIGS}" ]; then
+    if has arm64 ${archs} && [ -z "${SANITIZER_CONFIGS}" ] && [ "${SKIP_LTO_FOR_CONFIGURE}" != "YES" ]; then
         lto_ldflags="-flto=thin"
     fi
     
@@ -357,9 +358,15 @@ do_autotools_build_sub() {
     shift
     local archs=${@}
 
+    # Disable LTO during configure phase to avoid configure test failures
+    export SKIP_LTO_FOR_CONFIGURE="YES"
     setup_environment ${config} ${archs} || die "Failed to setup environment"
 
     ${SCAN_BUILD} ./configure --prefix=${PREFIX} --disable-static --enable-docs --enable-devel-docs --enable-builddocs --with-doxygen --with-xmlto --with-fop $(eval echo $(cat "${confopt_file}")) || die "Could not configure in $(pwd)"
+
+    # Re-enable LTO for actual compilation
+    unset SKIP_LTO_FOR_CONFIGURE
+    setup_environment ${config} ${archs} || die "Failed to setup environment"
 
     [[ "${SKIP_CLEAN}" == "YES" ]] || ${MAKE} clean || die "Unable to make clean in $(pwd)"
 
