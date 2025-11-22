@@ -205,7 +205,8 @@ setup_environment() {
     fi
 
     local simd_flags=""
-    if has arm64 ${archs} ; then
+    # Skip ARM-specific CPU flags during configure phase to avoid test failures
+    if has arm64 ${archs} && [ "${SKIP_LTO_FOR_CONFIGURE}" != "YES" ]; then
         # Apple Silicon optimization: use generic A14 to ensure compatibility
         simd_flags="-mcpu=apple-a14 -mtune=apple-a14"
     fi
@@ -219,7 +220,22 @@ setup_environment() {
         perf_flags="-flto=thin -ftree-vectorize -funroll-loops"
     fi
     
-    export CFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${simd_flags} ${OPT_CFLAGS} ${perf_flags} ${DEBUG_CFLAGS} ${HARDENING_CFLAGS} ${WARNING_CFLAGS}"
+    # During configure phase, use only native architecture for tests to avoid universal binary issues
+    # When building universal binaries, configure tests may fail with multiple -arch flags
+    local configure_arch_flags="${arch_flags}"
+    if [ "${SKIP_LTO_FOR_CONFIGURE}" == "YES" ]; then
+        local arch_count=0
+        for arch in ${archs} ; do
+            arch_count=$((arch_count + 1))
+        done
+        if [ ${arch_count} -gt 1 ]; then
+            # Use only the first architecture (usually native) for configure tests
+            local first_arch=$(first ${archs})
+            configure_arch_flags="-target ${first_arch}-apple-macos${MACOSX_DEPLOYMENT_TARGET} -arch ${first_arch}"
+        fi
+    fi
+    
+    export CFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${configure_arch_flags} ${simd_flags} ${OPT_CFLAGS} ${perf_flags} ${DEBUG_CFLAGS} ${HARDENING_CFLAGS} ${WARNING_CFLAGS}"
     
     # LDFLAGS also needs LTO (must match CFLAGS)
     local lto_ldflags=""
@@ -227,7 +243,7 @@ setup_environment() {
         lto_ldflags="-flto=thin"
     fi
     
-    export LDFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${lto_ldflags} -L${PREFIX}/lib -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks"
+    export LDFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${configure_arch_flags} ${lto_ldflags} -L${PREFIX}/lib -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks"
 
     if ! has i386 ${archs} && has ${config} ${SANITIZER_CONFIGS}; then
         export CFLAGS="${CFLAGS} ${SANITIZER_CFLAGS}"
