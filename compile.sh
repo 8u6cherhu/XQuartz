@@ -235,7 +235,7 @@ setup_environment() {
         fi
     fi
     
-    export CFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${configure_arch_flags} ${simd_flags} ${OPT_CFLAGS} ${perf_flags} ${DEBUG_CFLAGS} ${HARDENING_CFLAGS} ${WARNING_CFLAGS}"
+    export CFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${simd_flags} ${OPT_CFLAGS} ${perf_flags} ${DEBUG_CFLAGS} ${HARDENING_CFLAGS} ${WARNING_CFLAGS}"
     
     # LDFLAGS also needs LTO (must match CFLAGS)
     local lto_ldflags=""
@@ -243,7 +243,7 @@ setup_environment() {
         lto_ldflags="-flto=thin"
     fi
     
-    export LDFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${configure_arch_flags} ${lto_ldflags} -L${PREFIX}/lib -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks"
+    export LDFLAGS="${sdkdir:+-isysroot ${sdkdir}} ${arch_flags} ${lto_ldflags} -L${PREFIX}/lib -F${APPLICATION_PATH}/XQuartz.app/Contents/Frameworks"
 
     if ! has i386 ${archs} && has ${config} ${SANITIZER_CONFIGS}; then
         export CFLAGS="${CFLAGS} ${SANITIZER_CFLAGS}"
